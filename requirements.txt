@@ -1,1 +1,6 @@
-Flask
+Flask==0.11.1
+feedparser==5.2.1
+APScheduler==3.3.1
+maya==0.1.8
+tinydb==3.2.2
+pybloom-mirror==2.0.0
