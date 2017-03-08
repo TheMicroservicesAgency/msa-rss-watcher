@@ -4,7 +4,6 @@ import feedparser
 import maya
 from tinydb import TinyDB
 from tinydb import where
-from tinydb.storages import MemoryStorage
 import hashlib
 import json
 from pybloom import ScalableBloomFilter
@@ -12,19 +11,14 @@ import pickle
 import codecs
 import sys
 
+scheduler = BackgroundScheduler() # create the scheduler
 
-scheduler = BackgroundScheduler() # create the in-memory scheduler
-
-db = TinyDB(storage=MemoryStorage) # initialize the in-memory database
+db = TinyDB('/data/db.json') # initialize the database
 
 app = Flask(__name__) # initialize the Flask app
 
 
-@app.before_first_request
-def initialize():
-    scheduler.start()
-
-# from http://stackoverflow.com/questions/1094841/reusable-library-to-get-human-readable-version-of-file-size
+# from http://stackoverflow.com/questions/1094841
 def human_readable_bytes(num):
     for unit in ['B','KiB','MiB','GiB','TiB','PiB','EiB','ZiB']:
         if abs(num) < 1024.0:
@@ -84,6 +78,7 @@ def update_feed(feed_id):
 
                 sbf.add(item.link)
 
+
                 #
                 # SEND NOTIFICATION OUT
                 #
@@ -124,6 +119,18 @@ def update_feed(feed_id):
 
         # update the feed data in the db
         db.table('feeds').update(feed_data, where('id') == feed_id)
+
+
+
+@app.before_first_request
+def initialize():
+    scheduler.start()
+
+    # recreate any jobs if needed
+    feeds = db.table('feeds')
+    for feed in feeds.all():
+        scheduler.add_job(update_feed, 'interval', seconds=int(feed['update_interval_secs']), args=[feed['id']], id=feed['id'])
+
 
 
 @app.route('/feeds', methods=['POST'])
@@ -174,6 +181,7 @@ def list_watched_feeds():
     return response
 
 
+
 @app.route('/feeds/<id>')
 def return_feed_items(id):
 
@@ -196,6 +204,11 @@ def return_feed_items(id):
 @app.route('/feeds/<id>', methods=['DELETE'])
 def stop_watching_feed(id):
 
+    # unschedule the job related to this feed
+
+    scheduler.remove_job(id)
+
+    # remove the feed from the db
 
     feeds = db.table('feeds')
     results = feeds.search(where('id') == id)
@@ -208,10 +221,6 @@ def stop_watching_feed(id):
         feed = results[0]
         feeds.remove(eids=[feed.eid])
 
-    # unschedule the job related to this feed
-
-    scheduler.remove_job(id)
-
     # remove all additional data related to this feed from the db
 
     db.purge_table("feed_%s_items" % id)
@@ -222,7 +231,6 @@ def stop_watching_feed(id):
     if len(results) == 1:
         bf = results[0]
         bfs.remove(eids=[bf.eid])
-
 
 
 
