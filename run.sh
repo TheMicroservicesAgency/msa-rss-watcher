@@ -31,7 +31,7 @@ echo " $ ps aux | grep [n]ginx"
 ps aux | grep [n]ginx
 
 echo " * Starting Redis in the background ..."
-redis-server --daemonize yes
+redis-server /opt/ms/redis.conf --daemonize yes
 
 echo " "
 echo " $ ps aux | grep [r]edis"

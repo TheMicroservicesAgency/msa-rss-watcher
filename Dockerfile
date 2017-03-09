@@ -24,5 +24,7 @@ ADD swagger.json /opt/swagger/swagger.json
 ADD run.sh /opt/ms/
 ADD app.py /opt/ms/
 
+ADD redis.conf /opt/ms/
+
 # Execute the run script
 CMD ["ash", "/opt/ms/run.sh"]
