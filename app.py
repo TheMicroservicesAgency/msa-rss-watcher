@@ -2,16 +2,15 @@ from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 import feedparser
 import maya
-from tinydb import TinyDB, where, Query
-from tinydb.operations import increment
 import hashlib
 import json
+import redis
 
-scheduler = BackgroundScheduler() # create the scheduler
+scheduler = BackgroundScheduler()  # create the scheduler
 
-db = TinyDB('/data/db.json') # initialize the database
+r = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)  # connect to redis
 
-app = Flask(__name__) # initialize the Flask app
+app = Flask(__name__)  # initialize the Flask app
 
 
 def update_feed(feed_id):
@@ -19,89 +18,72 @@ def update_feed(feed_id):
 
         app.logger.debug("updating " + json.dumps(feed_id))
 
-        # get the feed data from the db
-        feed_data = db.table('feeds').search(where('id') == feed_id)[0]
+        # get the feed info from redis
+        feed = json.loads(r.hget("feeds", feed_id))
 
         # fetch the feed items, this involves an external HTTP request
-        data = feedparser.parse(feed_data['url'])
+        data = feedparser.parse(feed['url'])
         feed_fetch_time = maya.now().iso8601()
 
         app.logger.debug("got %s items " % len(data.entries))
 
-        # clear the feed_x_items table as we only keep the items from the last fetch
-        db.purge_table("feed_%s_last_items" % feed_id)
-        feed_items_table = db.table("feed_%s_last_items" % feed_id)
-        feed_cache_table = db.table("feed_%s_cache" % feed_id)
+        feed_items = "feed_%s_items" % feed_id
+        feed_cache = "feed_%s_cache" % feed_id
+
+        # clear the feed_x_items set as we only keep the items from the last fetch
+        r.delete(feed_items)
 
         for item in data.entries:
 
             new_item = {
-                'title' : item.title,
-                'link' : item.link,
-                'published' : maya.parse(item.published).iso8601(),
-                'summary' : item.summary
+                'title': item.title,
+                'link': item.link,
+                'published': maya.parse(item.published).iso8601(),
+                'summary': item.summary
             }
 
-            feed_items_table.insert(new_item) # add it to the last items fetched table
+            # add it to the last items set
+            r.sadd(feed_items, json.dumps(new_item))
 
             # check if we have seen this item before
-            results = feed_cache_table.search(where('link') == item.link)
-            if len(results) == 0:
+            already_seen = r.sismember(feed_cache, item.link)
+
+            if not already_seen:
 
                 app.logger.debug("new item => " + item.link)
 
                 # if that is a new item, add it to the cache
-                feed_cache_table.insert({'link': item.link, 'ttl' : 0})
+                r.sadd(feed_cache, item.link)
 
                 #
                 # SEND NOTIFICATION OUT
                 #
 
-                if 'notifications_sent' not in feed_data:
-                    feed_data['notifications_sent'] = 1
+                if 'notifications_sent' not in feed:
+                    feed['notifications_sent'] = 1
                 else:
-                    feed_data['notifications_sent'] = feed_data['notifications_sent'] + 1
+                    feed['notifications_sent'] = feed['notifications_sent'] + 1
 
-
-        # update the ttl of the items in the cache
-        feed_cache_table.update(increment('ttl'), Query().ttl.exists())
-
-        # remove old entries in the cache
-        item = Query()
-        feed_cache_table.remove(item.ttl > 3)
-
-        feed_data['items_cached'] = len(feed_cache_table)
+        feed['items_cached'] = r.scard(feed_cache)
 
         # update the feed timers
-        if 'time_first_fetch' not in feed_data:
-            feed_data['time_first_fetch'] = feed_fetch_time
+        if 'time_first_fetch' not in feed:
+            feed['time_first_fetch'] = feed_fetch_time
 
-        feed_data['time_last_fetch'] = feed_fetch_time
+        feed['time_last_fetch'] = feed_fetch_time
 
         # update the feed items counts
-        if 'items_fetched' not in feed_data:
-            feed_data['items_fetched'] = len(data.entries)
+        if 'items_fetched' not in feed:
+            feed['items_fetched'] = len(data.entries)
         else:
-            feed_data['items_fetched'] = feed_data['items_fetched'] + len(data.entries)
+            feed['items_fetched'] = feed['items_fetched'] + len(data.entries)
 
-        # update the feed data in the db
-        db.table('feeds').update(feed_data, where('id') == feed_id)
-
-
-@app.before_first_request
-def initialize():
-    scheduler.start()
-
-    # recreate any jobs if needed
-    feeds = db.table('feeds')
-    for feed in feeds.all():
-        scheduler.add_job(update_feed, 'interval', seconds=int(feed['fetch_interval_secs']), args=[feed['id']], id=feed['id'])
-
+        # update the feed info in redis
+        r.hset('feeds', feed_id, json.dumps(feed))
 
 
 @app.route('/feeds', methods=['POST'])
 def watch_new_feed():
-
     try:
         data = request.json
 
@@ -114,25 +96,39 @@ def watch_new_feed():
                 # generate an ID for this new feed
                 m = hashlib.sha256()
                 m.update(str.encode(feed['url']))
-                id = m.hexdigest()[0:6]
+                feed_id = m.hexdigest()[0:6]
 
-                new_feed = {'id': id, 'url': feed['url'], 'fetch_interval_secs': feed['fetch_interval_secs'],
+                feed_exists = r.hexists('feeds', feed_id)
+                if feed_exists:
+                    msg = {'errors': [{'title': 'Conflict',
+                                       'details': 'A feed for this given URL already exists.'}]}
+                    return jsonify(msg), 409
+
+                new_feed = {'id': feed_id, 'url': feed['url'],
+                            'fetch_interval_secs': feed['fetch_interval_secs'],
                             'webhook': feed['webhook']}
 
                 app.logger.debug("creating " + json.dumps(new_feed))
 
-                feeds = db.table('feeds')
-                feeds.insert(new_feed)
+                r.hset('feeds', feed_id, json.dumps(new_feed))
 
-                scheduler.add_job(update_feed, 'interval', seconds=int(feed['fetch_interval_secs']),
-                                  args=[new_feed['id']], id=id)
+                try:
+
+                    update_feed(feed_id)
+
+                    scheduler.add_job(update_feed, 'interval',
+                                      seconds=int(feed['fetch_interval_secs']),
+                                      args=[new_feed['id']], id=feed_id)
+
+                except Exception as e:
+                    app.logger.error(e)
+                    r.hdel('feeds', feed_id)
 
 
     except Exception as e:
         app.logger.error(e)
         msg = {'errors': [{'title': 'Could not parse feed', 'details': ''}]}
         return jsonify(msg), 400
-
 
     data = {}
     response = jsonify(data)
@@ -141,54 +137,75 @@ def watch_new_feed():
 
 @app.route('/feeds')
 def list_all_feeds():
-    feeds = db.table('feeds')
-    data = {'data': {'feeds': feeds.all()}}
+    feeds = []
+    for feed_id in r.hkeys('feeds'):
+        feed = json.loads(r.hget('feeds', feed_id))
+        feeds.append(feed)
+
+    data = {'data': {'feeds': feeds}}
     response = jsonify(data)
     return response
 
 
 @app.route('/feeds/<feed_id>')
 def return_feed_info(feed_id):
-
-    feeds = db.table('feeds')
-    results = feeds.search(where('id') == feed_id)
-
-    if len(results) == 0:
-        msg = {'errors': [{'title': 'Not found', 'details': 'Could not find a feed with the specified ID'}]}
+    feed_exists = r.hexists('feeds', feed_id)
+    if not feed_exists:
+        msg = {'errors': [{'title': 'Not found',
+                           'details': 'Could not find a feed with the specified ID'}]}
         return jsonify(msg), 404
 
-    feed = results[0]
-    feed_last_items = db.table("feed_%s_last_items" % feed_id)
+    # get the feed info and all the current items
+    feed = json.loads(r.hget('feeds', feed_id))
 
-    data = {'data': {'feed': feed, 'feed_last_items': feed_last_items.all()}}
+    items = []
+    for item in r.smembers("feed_%s_items" % feed_id):
+        items.append(json.loads(item))
+
+    data = {'data': {'feed': feed, 'feed_last_items': items}}
     response = jsonify(data)
     return response
 
 
 @app.route('/feeds/<feed_id>', methods=['DELETE'])
 def stop_watching_feed(feed_id):
-
-    # remove the feed from the db
-    feeds = db.table('feeds')
-    results = feeds.search(where('id') == feed_id)
-
-    if len(results) == 0:
-        msg = {'errors': [{'title': 'Not found', 'details': 'Could not find a feed with the specified ID'}]}
+    feed_exists = r.hexists('feeds', feed_id)
+    if not feed_exists:
+        msg = {'errors': [{'title': 'Not found',
+                           'details': 'Could not find a feed with the specified ID'}]}
         return jsonify(msg), 404
 
     # unschedule the job related to this feed
     scheduler.remove_job(feed_id)
 
-    if len(results) == 1:
-        feed = results[0]
-        feeds.remove(eids=[feed.eid])
+    # delete the feed
+    r.hdel('feeds', feed_id)
 
-    # remove all additional data related to this feed from the db
-    db.purge_table("feed_%s_last_items" % feed_id)
-    db.purge_table("feed_%s_cache" % feed_id)
+    # remove all additional data related to this feed
+    r.delete("feed_%s_items" % feed_id)
+    r.delete("feed_%s_cache" % feed_id)
+
+
+@app.route('/redis/info')
+def get_redis_info():
+    # return metrics about redis
+    data = {'data': {'info': r.info()}}
+    response = jsonify(data)
+    return response
+
+
+def initialize():
+    scheduler.start()
+
+    # recreate any jobs if needed
+    for feed_id in r.hkeys('feeds'):
+        feed = json.loads(r.hget('feeds', feed_id))
+
+        scheduler.add_job(update_feed, 'interval', seconds=int(feed['fetch_interval_secs']),
+                          args=[feed['id']], id=feed['id'])
 
 
 if __name__ == "__main__":
-
+    initialize()
     app.run(debug=True, port=8080, threaded=True)
     # app.run(port=8080, threaded=True)
