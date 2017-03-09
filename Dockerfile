@@ -1,8 +1,20 @@
 FROM msagency/msa-image-python:1.0.2
 
+# Install Redis
+RUN apk --no-cache --update add redis
+
 # Install the Python dependencies
 ADD requirements.txt /opt/ms/
-RUN pip install -r /opt/ms/requirements.txt
+RUN apk add --virtual=build_dependencies \
+    gcc \
+    make \
+    python3-dev \
+    musl-dev \
+    linux-headers \
+    && pip install -r /opt/ms/requirements.txt \
+    && apk del --purge -r build_dependencies \
+    && rm -rf /tmp/build \
+    && rm -rf /var/cache/apk/*
 
 # Override the default endpoints
 ADD README.md NAME LICENSE VERSION /opt/ms/

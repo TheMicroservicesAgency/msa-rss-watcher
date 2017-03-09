@@ -30,6 +30,13 @@ echo " "
 echo " $ ps aux | grep [n]ginx"
 ps aux | grep [n]ginx
 
+echo " * Starting Redis in the background ..."
+redis-server --daemonize yes
+
+echo " "
+echo " $ ps aux | grep [r]edis"
+ps aux | grep [r]edis
+
 echo " "
 echo " * Starting Python app ..."
 python app.py 2>> /dev/stderr 1>> /dev/stdout
