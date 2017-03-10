@@ -6,11 +6,15 @@ import hashlib
 import json
 import redis
 
-scheduler = BackgroundScheduler()  # create the scheduler
+# create the scheduler
+scheduler = BackgroundScheduler()
 
-r = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)  # connect to redis
+# connect to redis
+rdb = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+rcache = redis.StrictRedis(host='localhost', port=6379, db=1, decode_responses=True)
 
-app = Flask(__name__)  # initialize the Flask app
+# initialize the Flask app
+app = Flask(__name__)
 
 
 def update_feed(feed_id):
@@ -19,7 +23,7 @@ def update_feed(feed_id):
         app.logger.debug("updating " + json.dumps(feed_id))
 
         # get the feed info from redis
-        feed = json.loads(r.hget("feeds", feed_id))
+        feed = json.loads(rdb.hget("feeds", feed_id))
 
         # fetch the feed items, this involves an external HTTP request
         data = feedparser.parse(feed['url'])
@@ -27,11 +31,10 @@ def update_feed(feed_id):
 
         app.logger.debug("got %s items " % len(data.entries))
 
-        feed_items = "feed_%s_items" % feed_id
-        feed_cache = "feed_%s_cache" % feed_id
+        feed_items = "feed.%s.items" % feed_id
 
-        # clear the feed_x_items set as we only keep the items from the last fetch
-        r.delete(feed_items)
+        # clear the items set as we only keep the items from the last fetch
+        rdb.delete(feed_items)
 
         for item in data.entries:
 
@@ -43,17 +46,19 @@ def update_feed(feed_id):
             }
 
             # add it to the last items set
-            r.sadd(feed_items, json.dumps(new_item))
+            rdb.sadd(feed_items, json.dumps(new_item))
 
             # check if we have seen this item before
-            already_seen = r.sismember(feed_cache, item.link)
+            item_key = "%s.%s" % (feed_id, item.link)
+            already_seen = rcache.get(item_key) != None
 
             if not already_seen:
 
                 app.logger.debug("new item => " + item.link)
 
                 # if that is a new item, add it to the cache
-                r.sadd(feed_cache, item.link)
+                one_year_secs = 31556926
+                rcache.setex(item_key, one_year_secs, 1)
 
                 #
                 # SEND NOTIFICATION OUT
@@ -64,7 +69,7 @@ def update_feed(feed_id):
                 else:
                     feed['notifications_sent'] = feed['notifications_sent'] + 1
 
-        feed['items_cached'] = r.scard(feed_cache)
+        feed['items_cached'] = len(rcache.keys("%s.*" % feed_id))
 
         # update the feed timers
         if 'time_first_fetch' not in feed:
@@ -79,7 +84,7 @@ def update_feed(feed_id):
             feed['items_fetched'] = feed['items_fetched'] + len(data.entries)
 
         # update the feed info in redis
-        r.hset('feeds', feed_id, json.dumps(feed))
+        rdb.hset('feeds', feed_id, json.dumps(feed))
 
 
 @app.route('/feeds', methods=['POST'])
@@ -98,7 +103,7 @@ def watch_new_feed():
                 m.update(str.encode(feed['url']))
                 feed_id = m.hexdigest()[0:6]
 
-                feed_exists = r.hexists('feeds', feed_id)
+                feed_exists = rdb.hexists('feeds', feed_id)
                 if feed_exists:
                     msg = {'errors': [{'title': 'Conflict',
                                        'details': 'A feed for this given URL already exists.'}]}
@@ -110,7 +115,7 @@ def watch_new_feed():
 
                 app.logger.debug("creating " + json.dumps(new_feed))
 
-                r.hset('feeds', feed_id, json.dumps(new_feed))
+                rdb.hset('feeds', feed_id, json.dumps(new_feed))
 
                 try:
 
@@ -122,7 +127,7 @@ def watch_new_feed():
 
                 except Exception as e:
                     app.logger.error(e)
-                    r.hdel('feeds', feed_id)
+                    rdb.hdel('feeds', feed_id)
 
 
     except Exception as e:
@@ -138,8 +143,8 @@ def watch_new_feed():
 @app.route('/feeds')
 def list_all_feeds():
     feeds = []
-    for feed_id in r.hkeys('feeds'):
-        feed = json.loads(r.hget('feeds', feed_id))
+    for feed_id in rdb.hkeys('feeds'):
+        feed = json.loads(rdb.hget('feeds', feed_id))
         feeds.append(feed)
 
     data = {'data': {'feeds': feeds}}
@@ -149,17 +154,17 @@ def list_all_feeds():
 
 @app.route('/feeds/<feed_id>')
 def return_feed_info(feed_id):
-    feed_exists = r.hexists('feeds', feed_id)
+    feed_exists = rdb.hexists('feeds', feed_id)
     if not feed_exists:
         msg = {'errors': [{'title': 'Not found',
                            'details': 'Could not find a feed with the specified ID'}]}
         return jsonify(msg), 404
 
     # get the feed info and all the current items
-    feed = json.loads(r.hget('feeds', feed_id))
+    feed = json.loads(rdb.hget('feeds', feed_id))
 
     items = []
-    for item in r.smembers("feed_%s_items" % feed_id):
+    for item in rdb.smembers("feed.%s.items" % feed_id):
         items.append(json.loads(item))
 
     data = {'data': {'feed': feed, 'feed_last_items': items}}
@@ -169,27 +174,39 @@ def return_feed_info(feed_id):
 
 @app.route('/feeds/<feed_id>', methods=['DELETE'])
 def stop_watching_feed(feed_id):
-    feed_exists = r.hexists('feeds', feed_id)
-    if not feed_exists:
+
+    feed_exists = rdb.hexists('feeds', feed_id)
+    if feed_exists:
+
+        # unschedule the job related to this feed
+        scheduler.remove_job(feed_id)
+
+        feed = rdb.hget('feeds', feed_id)
+
+        # delete the feed
+        rdb.hdel('feeds', feed_id)
+
+        # remove all additional data related to this feed
+        rdb.delete("feed.%s.items" % feed_id)
+
+        cached_items = rcache.keys("%s.*" % feed_id)
+        for key in cached_items:
+            rcache.delete(key)
+
+        data = {'data': {'feed': feed }}
+        response = jsonify(data)
+        return response
+
+    else:
         msg = {'errors': [{'title': 'Not found',
                            'details': 'Could not find a feed with the specified ID'}]}
         return jsonify(msg), 404
-
-    # unschedule the job related to this feed
-    scheduler.remove_job(feed_id)
-
-    # delete the feed
-    r.hdel('feeds', feed_id)
-
-    # remove all additional data related to this feed
-    r.delete("feed_%s_items" % feed_id)
-    r.delete("feed_%s_cache" % feed_id)
 
 
 @app.route('/redis/info')
 def get_redis_info():
     # return metrics about redis
-    data = {'data': {'info': r.info()}}
+    data = {'data': {'info': rdb.info()}}
     response = jsonify(data)
     return response
 
@@ -198,8 +215,8 @@ def initialize():
     scheduler.start()
 
     # recreate any jobs if needed
-    for feed_id in r.hkeys('feeds'):
-        feed = json.loads(r.hget('feeds', feed_id))
+    for feed_id in rdb.hkeys('feeds'):
+        feed = json.loads(rdb.hget('feeds', feed_id))
 
         scheduler.add_job(update_feed, 'interval', seconds=int(feed['fetch_interval_secs']),
                           args=[feed['id']], id=feed['id'])
