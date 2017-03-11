@@ -1,17 +1,332 @@
 {
     "swagger": "2.0",
     "info": {
-        "version": "1.0.0",
-        "title": "msa-rss-watcher",
-        "description": "An exmple of a simple Python microservice"
+        "title": "MSA-RSS-WATCHER",
+        "description": "Microservice to watch RSS or Atom feeds, and trigger notifications via webhooks for new items",
+        "version": "1.0.0"
     },
+    "produces": [
+        "application/json"
+    ],
     "paths": {
-        "/hello-world": {
+        "/ms/version": {
             "get": {
-                "description": "Returns \"Hello world\"\n",
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the microservice version number",
                 "responses": {
                     "200": {
-                        "description": "Successful response"
+                        "description": "the version number"
+                    }
+                }
+            }
+        },
+        "/ms/name": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the microservice name",
+                "responses": {
+                    "200": {
+                        "description": "the name"
+                    }
+                }
+            }
+        },
+        "/ms/readme.md": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the microservice readme in markdown",
+                "responses": {
+                    "200": {
+                        "description": "the readme in markdown"
+                    }
+                }
+            }
+        },
+        "/ms/readme.html": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the microservice readme in html",
+                "responses": {
+                    "200": {
+                        "description": "the readme in html"
+                    }
+                }
+            }
+        },
+        "/swagger/swagger.json": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the microservice Swagger JSON file",
+                "responses": {
+                    "200": {
+                        "description": "the Swagger JSON file"
+                    }
+                }
+            }
+        },
+        "/swagger/#": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return the Swagger-UI page",
+                "responses": {
+                    "200": {
+                        "description": "the Swagger-UI page"
+                    }
+                }
+            }
+        },
+        "/nginx/stats.json": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return stats about Nginx in JSON",
+                "responses": {
+                    "200": {
+                        "description": "the stats about Nginx in JSON"
+                    }
+                }
+            }
+        },
+        "/nginx/stats.html": {
+            "get": {
+                "tags": [
+                    "msa-standard"
+                ],
+                "summary": "Return a dashboard displaying the stats from Nginx",
+                "responses": {
+                    "200": {
+                        "description": "the Nginx stats dashboard"
+                    }
+                }
+            }
+        },
+        "/feeds": {
+            "post": {
+                "tags": [
+                    "msa-rss-watcher"
+                ],
+                "summary": "Watch a new RSS / Atom feed",
+                "parameters": [
+                    {
+                        "name": "new feed",
+                        "in": "body",
+                        "description": "the feed parameters",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/new_feed"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the sucessfully created feed",
+                        "schema": {
+                            "$ref": "#/definitions/feed"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid feed parameters",
+                        "schema": {
+                            "$ref": "#/definitions/error"
+                        }
+                    },
+                    "409": {
+                        "description": "conflict with another feed",
+                        "schema": {
+                            "$ref": "#/definitions/error"
+                        }
+                    }
+                }
+            },
+            "get": {
+                "tags": [
+                    "msa-rss-watcher"
+                ],
+                "summary": "Returns the list of currently watched feeds",
+                "responses": {
+                    "200": {
+                        "description": "the list of currently watched feeds",
+                        "schema": {
+                            "$ref": "#/definitions/feeds"
+                        }
+                    }
+                }
+            }
+        },
+        "/feeds/{id}": {
+            "get": {
+                "tags": [
+                    "msa-rss-watcher"
+                ],
+                "summary": "Get additionnal info about a watched feed",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "the id of the feed, ex \"ede3ed\"",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the information about the feed",
+                        "schema": {
+                            "$ref": "#/definitions/feed_info"
+                        }
+                    },
+                    "404": {
+                        "description": "feed not found",
+                        "schema": {
+                            "$ref": "#/definitions/error"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "msa-rss-watcher"
+                ],
+                "summary": "Stop watching the given feed",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "the id of the feed to delete, ex \"ede3ed\"",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the deleted feed info",
+                        "schema": {
+                            "$ref": "#/definitions/feed"
+                        }
+                    },
+                    "404": {
+                        "description": "feed not found",
+                        "schema": {
+                            "$ref": "#/definitions/error"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "new_feed": {
+            "type": "object",
+            "required": [
+                "url",
+                "webhook"
+            ],
+            "properties": {
+                "url": {
+                    "type": "string"
+                },
+                "webhook": {
+                    "type": "string"
+                },
+                "refresh_secs": {
+                    "type": "integer"
+                }
+            }
+        },
+        "feed_info": {
+            "type": "object",
+            "required": [
+                "feed"
+            ],
+            "properties": {
+                "feed": {
+                    "$ref": "#/definitions/feed"
+                },
+                "feed_last_items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/feed_item"
+                    }
+                }
+            }
+        },
+        "feed_item": {
+            "type": "object",
+            "required": [
+                "link",
+                "published"
+            ],
+            "properties": {
+                "link": {
+                    "type": "string"
+                },
+                "published": {
+                    "type": "string"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "feed": {
+            "type": "object",
+            "required": [
+                "id",
+                "url",
+                "webhook",
+                "refresh_secs"
+            ],
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "webhook": {
+                    "type": "string"
+                },
+                "refresh_secs": {
+                    "type": "integer"
+                }
+            }
+        },
+        "feeds": {
+            "type": "array",
+            "items": {
+                "$ref": "#/definitions/feed"
+            }
+        },
+        "error": {
+            "type": "object",
+            "required": [
+                "title",
+                "details"
+            ],
+            "properties": {
+                "title": {
+                    "type": "string"
+                },
+                "details": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
                     }
                 }
             }
