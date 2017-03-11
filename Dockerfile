@@ -16,6 +16,10 @@ RUN apk add --virtual=build_dependencies \
     && rm -rf /tmp/build \
     && rm -rf /var/cache/apk/*
 
+# Set the timezone - required by the scheduler
+RUN apk add --no-cache --update tzdata
+ENV TZ=Etc/UTC
+
 # Override the default endpoints
 ADD README.md NAME LICENSE VERSION /opt/ms/
 ADD swagger.json /opt/swagger/swagger.json
@@ -23,7 +27,6 @@ ADD swagger.json /opt/swagger/swagger.json
 # Copy all the other application files to /opt/ms
 ADD run.sh /opt/ms/
 ADD app.py /opt/ms/
-
 ADD redis.conf /opt/ms/
 
 # Execute the run script
