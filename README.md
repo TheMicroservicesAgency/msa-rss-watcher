@@ -1,25 +1,29 @@
 
 # msa-rss-watcher
 
-Microservice to watch RSS/Atom feed and send notifications for new items, via webhooks.
+Microservice to watch RSS or Atom feeds, and trigger notifications via webhooks for new items.
+
+Built using [feedparser](https://pypi.python.org/pypi/feedparser).
 
 ## Quick start
 
 Execute the microservice container with the following command :
 
-
-    docker run -ti -p 8080:80 msagency/msa-rss-watcher
+    docker run -ti -p 9010:80 msagency/msa-rss-watcher
 
 ## Example(s)
+
+
 
 
 
 ## Endpoints
 
 - POST [/feeds]() : watches a new feed for new updates
-- GET [/feeds]() : returns the list of currently watched feeds
-- GET [/feeds/:id] : get last X items of a given feed
-- DELETE [/feeds/:id] : stop watching the given RSS feed
+- GET [/feeds](/feeds) : returns the list of currently watched feeds
+- GET [/feeds/:id]() : get last items fetched of a given feed
+- DELETE [/feeds/:id]() : stop watching the given RSS feed
+
 
 ## Standard endpoints
 

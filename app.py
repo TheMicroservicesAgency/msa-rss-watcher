@@ -17,6 +17,12 @@ rcache = redis.StrictRedis(host='localhost', port=6379, db=1, decode_responses=T
 app = Flask(__name__)
 
 
+@app.after_request
+def add_header(response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
 def update_feed(feed_id):
     with app.app_context():
 
@@ -96,7 +102,7 @@ def watch_new_feed():
 
             feed = data['feed']
 
-            if 'url' in feed and 'fetch_interval_secs' in feed and 'webhook' in feed:
+            if 'url' in feed and 'refresh_secs' in feed and 'webhook' in feed:
 
                 # generate an ID for this new feed
                 m = hashlib.sha256()
@@ -110,7 +116,7 @@ def watch_new_feed():
                     return jsonify(msg), 409
 
                 new_feed = {'id': feed_id, 'url': feed['url'],
-                            'fetch_interval_secs': feed['fetch_interval_secs'],
+                            'refresh_secs': feed['refresh_secs'],
                             'webhook': feed['webhook']}
 
                 app.logger.debug("creating " + json.dumps(new_feed))
@@ -122,17 +128,25 @@ def watch_new_feed():
                     update_feed(feed_id)
 
                     scheduler.add_job(update_feed, 'interval',
-                                      seconds=int(feed['fetch_interval_secs']),
+                                      seconds=int(feed['refresh_secs']),
                                       args=[new_feed['id']], id=feed_id)
+
+
+                    data = {'data': {'feed': new_feed}}
+                    response = jsonify(data)
+                    return response
 
                 except Exception as e:
                     app.logger.error(e)
                     rdb.hdel('feeds', feed_id)
 
+                    msg = {'errors': [{'title': 'Could not create feed watch', 'details': [str(e)] }] }
+                    return jsonify(msg), 400
+
 
     except Exception as e:
         app.logger.error(e)
-        msg = {'errors': [{'title': 'Could not parse feed', 'details': ''}]}
+        msg = {'errors': [{'title': 'Could not parse feed', 'details': [str(e)] }] }
         return jsonify(msg), 400
 
     data = {}
@@ -181,7 +195,7 @@ def stop_watching_feed(feed_id):
         # unschedule the job related to this feed
         scheduler.remove_job(feed_id)
 
-        feed = rdb.hget('feeds', feed_id)
+        feed = json.loads(rdb.hget('feeds', feed_id))
 
         # delete the feed
         rdb.hdel('feeds', feed_id)
@@ -218,11 +232,11 @@ def initialize():
     for feed_id in rdb.hkeys('feeds'):
         feed = json.loads(rdb.hget('feeds', feed_id))
 
-        scheduler.add_job(update_feed, 'interval', seconds=int(feed['fetch_interval_secs']),
+        scheduler.add_job(update_feed, 'interval', seconds=int(feed['refresh_secs']),
                           args=[feed['id']], id=feed['id'])
 
 
 if __name__ == "__main__":
     initialize()
-    app.run(debug=True, port=8080, threaded=True)
-    # app.run(port=8080, threaded=True)
+    #app.run(debug=True, port=8080, threaded=True)
+    app.run(port=8080, threaded=True)
