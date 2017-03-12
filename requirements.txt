@@ -3,3 +3,4 @@ feedparser==5.2.1
 APScheduler==3.3.1
 maya==0.1.8
 redis==2.10.5
+requests==2.13.0

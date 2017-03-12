@@ -5,6 +5,9 @@ import maya
 import hashlib
 import json
 import redis
+import logging
+import requests
+import time
 
 # create the scheduler
 scheduler = BackgroundScheduler()
@@ -19,23 +22,38 @@ app = Flask(__name__)
 
 @app.after_request
 def add_header(response):
+    """Adds headers to all responses disabling upstream caching"""
+
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 
 
 def update_feed(feed_id):
+    """Refresh a given feed by fetching the RSS/Atom URL content, looks for new items 
+    and sends notifications to the feed webhook"""
+
     with app.app_context():
 
-        app.logger.debug("updating " + json.dumps(feed_id))
+        app.logger.info("updating feed %s" % feed_id)
 
         # get the feed info from redis
         feed = json.loads(rdb.hget("feeds", feed_id))
 
         # fetch the feed items, this involves an external HTTP request
-        data = feedparser.parse(feed['url'])
-        feed_fetch_time = maya.now().iso8601()
+        update_time = maya.now().iso8601()
 
-        app.logger.debug("got %s items " % len(data.entries))
+        try:
+
+            start = time.time()
+            data = feedparser.parse(feed['url'])
+            time_elapsed = time.time() - start
+            app.logger.info("fetching %s took %s seconds " % (feed['url'], time_elapsed))
+            app.logger.info("got %s items " % len(data.entries))
+
+        except Exception as e:
+            app.logger.error("Could not fetch remote URL %s" % feed['url'])
+            app.logger.error(e)
+            return None
 
         feed_items = "feed.%s.items" % feed_id
 
@@ -62,26 +80,44 @@ def update_feed(feed_id):
 
                 app.logger.debug("new item => " + item.link)
 
-                # if that is a new item, add it to the cache
+                # if that is a new item, add it to the redis cache
+                # a very long expiration is used since we want redis to evict
+                # the oldest entries automatically when it's full
                 one_year_secs = 31556926
                 rcache.setex(item_key, one_year_secs, 1)
 
-                #
-                # SEND NOTIFICATION OUT
-                #
+                # send the notification to the designated webhook
+                app.logger.info("sending POST request with new item to %s" % feed['webhook'])
 
-                if 'notifications_sent' not in feed:
-                    feed['notifications_sent'] = 1
-                else:
-                    feed['notifications_sent'] = feed['notifications_sent'] + 1
+                try:
+                    start = time.time()
+
+                    headers = {'Content-Type': 'application/json', 'user-agent': 'msa-rss-watcher'}
+                    requests.post(feed['webhook'], json.dumps({'data': new_item}), headers=headers)
+
+                    time_elapsed = time.time() - start
+                    app.logger.info("sending the notification took %s seconds " % time_elapsed)
+
+                    if 'notifications_sent' not in feed:
+                        feed['notifications_sent'] = 1
+                    else:
+                        feed['notifications_sent'] = feed['notifications_sent'] + 1
+
+                except Exception as e:
+                    app.logger.error("Could not send notification to webhook %s" % feed['webhook'])
+                    app.logger.error(e)
+                    # remove the item from the cache, so that it retries to resend it
+                    # at the next update
+                    rcache.delete(item_key)
+
 
         feed['items_cached'] = len(rcache.keys("%s.*" % feed_id))
 
         # update the feed timers
         if 'time_first_fetch' not in feed:
-            feed['time_first_fetch'] = feed_fetch_time
+            feed['time_first_fetch'] = update_time
 
-        feed['time_last_fetch'] = feed_fetch_time
+        feed['time_last_fetch'] = update_time
 
         # update the feed items counts
         if 'items_fetched' not in feed:
@@ -95,6 +131,8 @@ def update_feed(feed_id):
 
 @app.route('/feeds', methods=['POST'])
 def watch_new_feed():
+    """Add a new feed and create a job to refresh it at the specified interval"""
+
     try:
         data = request.json
 
@@ -109,28 +147,28 @@ def watch_new_feed():
                 m.update(str.encode(feed['url']))
                 feed_id = m.hexdigest()[0:6]
 
+                # return an error if the feed already exists
                 feed_exists = rdb.hexists('feeds', feed_id)
                 if feed_exists:
                     msg = {'errors': [{'title': 'Conflict',
                                        'details': 'A feed for this given URL already exists.'}]}
                     return jsonify(msg), 409
 
+                # create the new feed
                 new_feed = {'id': feed_id, 'url': feed['url'],
                             'refresh_secs': feed['refresh_secs'],
                             'webhook': feed['webhook']}
 
-                app.logger.debug("creating " + json.dumps(new_feed))
-
+                app.logger.info("creating " + json.dumps(new_feed))
                 rdb.hset('feeds', feed_id, json.dumps(new_feed))
 
                 try:
+                    # do a quick test of that remote URL
+                    requests.get(new_feed['url'])
 
-                    update_feed(feed_id)
-
-                    scheduler.add_job(update_feed, 'interval',
-                                      seconds=int(feed['refresh_secs']),
+                    # create a recurring job for this new feed
+                    scheduler.add_job(update_feed, 'interval', seconds=int(new_feed['refresh_secs']),
                                       args=[new_feed['id']], id=feed_id)
-
 
                     data = {'data': {'feed': new_feed}}
                     response = jsonify(data)
@@ -156,6 +194,8 @@ def watch_new_feed():
 
 @app.route('/feeds')
 def list_all_feeds():
+    """Returns the list of feeds currently watched"""
+
     feeds = []
     for feed_id in rdb.hkeys('feeds'):
         feed = json.loads(rdb.hget('feeds', feed_id))
@@ -168,6 +208,8 @@ def list_all_feeds():
 
 @app.route('/feeds/<feed_id>')
 def return_feed_info(feed_id):
+    """Returns all info related to a given feed, the feed def. & last items fetched"""
+
     feed_exists = rdb.hexists('feeds', feed_id)
     if not feed_exists:
         msg = {'errors': [{'title': 'Not found',
@@ -188,9 +230,12 @@ def return_feed_info(feed_id):
 
 @app.route('/feeds/<feed_id>', methods=['DELETE'])
 def stop_watching_feed(feed_id):
+    """Stop watching a given feed, and deleted all associated data"""
 
     feed_exists = rdb.hexists('feeds', feed_id)
     if feed_exists:
+
+        app.logger.info("stopping job for feed %s" % feed_id)
 
         # unschedule the job related to this feed
         scheduler.remove_job(feed_id)
@@ -207,6 +252,8 @@ def stop_watching_feed(feed_id):
         for key in cached_items:
             rcache.delete(key)
 
+        app.logger.info("deleted all data of the feed %s" % feed_id)
+
         data = {'data': {'feed': feed }}
         response = jsonify(data)
         return response
@@ -219,24 +266,42 @@ def stop_watching_feed(feed_id):
 
 @app.route('/redis/info')
 def get_redis_info():
-    # return metrics about redis
+    """Return stats about Redis"""
+
     data = {'data': {'info': rdb.info()}}
     response = jsonify(data)
     return response
 
 
 def initialize():
+    """Initialize the app, starts the scheduler and reloads existing feeds"""
+
+    app.logger.info("starting the scheduler")
     scheduler.start()
 
-    # recreate any jobs if needed
+    app.logger.info("reloading the list of feeds from redis")
+
+    # reload existing feeds & recreate any jobs if needed
     for feed_id in rdb.hkeys('feeds'):
+
         feed = json.loads(rdb.hget('feeds', feed_id))
+
+        app.logger.info("reloading the feed %s" % feed_id)
+        app.logger.debug("%s" % feed)
 
         scheduler.add_job(update_feed, 'interval', seconds=int(feed['refresh_secs']),
                           args=[feed['id']], id=feed['id'])
 
 
 if __name__ == "__main__":
+
+    # setup the logging
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+
     initialize()
-    #app.run(debug=True, port=8080, threaded=True)
+
     app.run(port=8080, threaded=True)
